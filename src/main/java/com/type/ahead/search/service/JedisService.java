@@ -10,7 +10,10 @@ import org.springframework.stereotype.Service;
 import redis.clients.jedis.Jedis;
 
 import javax.annotation.PostConstruct;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 @Service
 @Slf4j
@@ -28,12 +31,8 @@ public class JedisService {
     Integer dataLoadSize;
     private final TrieDataStore trieDataStore = TrieDataStore.getTrieInstance();
 
-//    private Map<String, Long> memberScoreMap = new HashMap<>();
-    private Map<String, Long> memberScoreMapNew = new HashMap<>();
-
-//    private Set<String> newWordSet = new HashSet<>();
-
-//    private Set<String> inputQuerySet = new HashSet<>();
+    // A map to keep track of all the input queries with score (score represents how many times each query was passed)
+    private Map<String, Long> queryScoreMap = new HashMap<>();
 
     private boolean initialReload = true;
 
@@ -42,67 +41,64 @@ public class JedisService {
     @Autowired
     private Jedis jedis;
 
+    /**
+     * This method is responsible for the initial setup needed for the service to work
+     * When we start the service both the trieDataStore and the Redis data store are empty
+     * so won't be able to provide any suggestions, to counter this issue we create a set of
+     * words that are most relevant to us and load them first to the trieDataStore and there
+     * to the redis in memory cache thus allowing us to provide suggestions just after the
+     * initial service start up.
+     * Here are I am directly this starter set of words from application.properties file
+     * based on our needs we can change that and read from some database instead.
+     */
     @PostConstruct
     public void loadStarterDataToTrieAndRedis() {
+        // Checking DB size if redis is not empty we don't need to reload the data at each startup
         if (jedis.dbSize() == 0) {
             trieDataStore.TrieLoadData(wordList.subList(0, dataLoadSize));
             loadDataToRedis();
-            initialReload = false;
             trieDataStore.reset();
         }
+        initialReload = false;
     }
 
+    /**
+     * Method used to load data to redis cache this method gets called initially when the application start
+     * and then again periodically as a cron job.
+     */
     public void loadDataToRedis() {
-        Map<String, Double> suggestionWithScore = new HashMap<>();
-        for (String prefix : trieDataStore.allPrefixes()) {
+        Map<String, Double> prefixToSuggestionListWithScoreMap = new HashMap<>();
+        // Get all possible prefixes of all the words stored in the TrieDataStore and Iterate over them
+        for (String prefix : trieDataStore.getAllTriePrefixes()) {
+            // Get all suggestions for a given prefix
             List<String> suggestionsList = trieDataStore.suggest(prefix);
             int i = 0;
             for (String suggestion : suggestionsList) {
-                suggestionWithScore.put(suggestion, initialReload ? 0d : memberScoreMapNew.get(suggestion));
-                i++;
+                prefixToSuggestionListWithScoreMap.put(suggestion, initialReload ? 0d : queryScoreMap.get(suggestion)); // during initial reload set score of each suggestion to
+                i++;                                                                                                    // Other wise get score from queryScoreMap
                 if (i == redisSetSize / (initialReload ? 1 : redisRetainRatio)) break;
             }
             if (jedis.exists(prefix)) {
                 double existingSuggestionListSize = jedis.zcount(prefix, 0, Double.MAX_VALUE);
-                if (existingSuggestionListSize + suggestionWithScore.size() > redisSetSize) {
-                    double extraElements = (existingSuggestionListSize + suggestionWithScore.size()) - redisSetSize;
+                if (existingSuggestionListSize + prefixToSuggestionListWithScoreMap.size() > redisSetSize) {
+                    double extraElements = (existingSuggestionListSize + prefixToSuggestionListWithScoreMap.size()) - redisSetSize;
                     jedis.zremrangeByRank(prefix, 0, (long) extraElements - 1);  // remove extra elements with the lowest scores
                 }
             }
-            jedis.zadd(prefix, suggestionWithScore);  // key present then add if final size less or equal to max size
-            suggestionWithScore = new HashMap<>();
+            jedis.zadd(prefix, prefixToSuggestionListWithScoreMap);  // key present then add if final size less or equal to max size
+            prefixToSuggestionListWithScoreMap = new HashMap<>();
         }
     }
 
     public void logInputQuery(String word) {
-//        inputQuerySet.add(word);
-        if (memberScoreMapNew.containsKey(word)) {
-            memberScoreMapNew.put(word, memberScoreMapNew.get(word) + 1);
+        if (queryScoreMap.containsKey(word)) {
+            queryScoreMap.put(word, queryScoreMap.get(word) + 1);
         } else {
-            memberScoreMapNew.put(word, 1l);
+            queryScoreMap.put(word, 1l);
         }
     }
 
-//    public void processQuery(String word) {
-//        boolean wordAlreadyInCache = jedis.exists(word);
-//        List<String> suggestions = jedis.zrange(word, 0, -1); //FIXME: sometimes word can be already present as a prefix even if not encountered before
-//            /*
-//             eg . if we had earlier processed the word herself , her will be present as a prefix in cache even though it won't contain the word her same for word he
-//                need to find a better approach to fix such issues.
-//             */
-//        if (wordAlreadyInCache && suggestions.contains(word)) {
-//            if (memberScoreMap.containsKey(word)) {
-//                memberScoreMap.put(word, memberScoreMap.get(word) + 1);
-//            } else {
-//                memberScoreMap.put(word, 1L);
-//            }
-//        } else {
-////            newWordSet.add(word);
-//            trieDataStore.insertWord(word);
-//        }
-//    }
-
-    public void processQuery2(String word, Long wordScore) {
+    public void processQuery(String word, Long wordScore) {
         boolean wordAlreadyInCacheAsKey = jedis.exists(word);
         List<String> suggestions = jedis.zrange(word, 0, -1); //FIXME: sometimes word can be already present as a prefix even if not encountered before
             /*
@@ -112,7 +108,7 @@ public class JedisService {
         if (!isWordInCache(word, wordAlreadyInCacheAsKey, suggestions)) {
             trieDataStore.insertWord(word);
         } else {
-            redisIncreaseScoreOfExistingMembers2(word, wordScore);
+            redisIncreaseScoreOfExistingMembers(word, wordScore);
 //            memberScoreMapNew.remove(word);
         }
     }
@@ -122,7 +118,7 @@ public class JedisService {
     }
 
 
-    private void redisIncreaseScoreOfExistingMembers2(String word, Long wordScore) {
+    private void redisIncreaseScoreOfExistingMembers(String word, Long wordScore) {
         List<String> allPrefixesForWord = extractAllPrefixes(word);
         for (String prefix : allPrefixesForWord) {
             long setSize = jedis.zcount(prefix, 0d, Double.MAX_VALUE);
@@ -147,23 +143,16 @@ public class JedisService {
     @Scheduled(cron = "*/30 * * * * *")
     public void cleanUpAndDataLoading() {
         try {
-            if (memberScoreMapNew.size() >= 100) {
+            if (queryScoreMap.size() >= 5) {
                 systemDown = true;
-//                for (String word : inputQuerySet) {
-//                    processQuery(word);
-//                }
-                for (Map.Entry<String, Long> entry : memberScoreMapNew.entrySet()) {
+                for (Map.Entry<String, Long> entry : queryScoreMap.entrySet()) {
                     Long wordScore = entry.getValue();
                     String word = entry.getKey();
-                    processQuery2(word, wordScore);
+                    processQuery(word, wordScore);
                 }
-//                inputQuerySet = new HashSet<>();
-//                redisIncreaseScoreOfExistingMembers();
-//                memberScoreMap = new HashMap<>();
                 loadDataToRedis();
-                memberScoreMapNew = new HashMap<>();
+                queryScoreMap = new HashMap<>();
                 trieDataStore.reset();
-//                inputQuerySet = new HashSet<>();
                 systemDown = false;
             }
         } catch (Exception e) {

@@ -17,8 +17,7 @@ public class TrieNode {
 
     public TrieNode(char c) {
         this.c = c;
-        totalNodes++;
-//        log.info("new node created for character :{}", c);
+        totalNodes++;                                           // Increment totalNodes when new node is created
         children = new HashMap<>();
     }
 

@@ -12,11 +12,9 @@ import java.util.*;
 public class TrieDataStore {
     TrieNode root;
     private static TrieDataStore trie_DataStore_instance = null;
-
-    private Set<String> allWords = new HashSet<>();
-
+    private Set<String> allWords = new HashSet<>();  // used to maintain a list of words loaded into the Trie
+                                                     // which can then be used to generate a list of all possible prefixes
     private TrieDataStore() {
-
     }
 
     public static TrieDataStore getTrieInstance() {
@@ -32,8 +30,13 @@ public class TrieDataStore {
         TrieNode.totalNodes = 0;
     }
 
+    /**
+     * This method is used to bulk load data into the Trie
+     * @param words
+     */
     public void TrieLoadData(List<String> words) {
-        root = new TrieNode();
+        if(root ==null)
+            root = new TrieNode();
         for (String word : words) {
             allWords.add(word);
             root.insert(word);
@@ -76,15 +79,15 @@ public class TrieDataStore {
         return list;
     }
 
-    public Set<String> allPrefixes() {
+    public Set<String> getAllTriePrefixes() {
         Set<String> prefixes = new HashSet<>();
         for (String word : allWords)
-            prefixes.addAll(extractAllPrefixes(word));
+            prefixes.addAll(getAllPrefixesOfWord(word));
         return prefixes;
 
     }
 
-    private Collection<String> extractAllPrefixes(String word) {
+    private Collection<String> getAllPrefixesOfWord(String word) {
         List<String> prefixes = new ArrayList<>();
         for (int i = 1; i <= word.length(); i++) {
             prefixes.add(word.substring(0, i));
